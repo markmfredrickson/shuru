@@ -84,6 +84,35 @@ describe("buildArgs", () => {
 		]);
 	});
 
+	test("writable mounts append :rw suffix", () => {
+		const args = buildArgs("shuru", {
+			writableMounts: { "./src": "/workspace" },
+		});
+		expect(args).toEqual([
+			"shuru",
+			"run",
+			"--stdio",
+			"--mount",
+			"./src:/workspace:rw",
+		]);
+	});
+
+	test("mounts and writableMounts together", () => {
+		const args = buildArgs("shuru", {
+			mounts: { "./data": "/data" },
+			writableMounts: { "./src": "/workspace" },
+		});
+		expect(args).toEqual([
+			"shuru",
+			"run",
+			"--stdio",
+			"--mount",
+			"./data:/data",
+			"--mount",
+			"./src:/workspace:rw",
+		]);
+	});
+
 	test("secrets", () => {
 		const args = buildArgs("shuru", {
 			allowNet: true,

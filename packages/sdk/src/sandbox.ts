@@ -224,5 +224,11 @@ export function buildArgs(bin: string, opts: StartOptions): string[] {
 		}
 	}
 
+	if (opts.writableMounts) {
+		for (const [host, guest] of Object.entries(opts.writableMounts)) {
+			args.push("--mount", `${host}:${guest}:rw`);
+		}
+	}
+
 	return args;
 }

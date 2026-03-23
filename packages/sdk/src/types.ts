@@ -17,7 +17,10 @@ export interface StartOptions {
 	diskSize?: number;
 	allowNet?: boolean;
 	ports?: string[];
+	/** Host → guest directory mounts (read-only). */
 	mounts?: Record<string, string>;
+	/** Host → guest directory mounts (read-write: guest writes land on host). */
+	writableMounts?: Record<string, string>;
 	secrets?: Record<string, SecretConfig>;
 	network?: NetworkConfig;
 	shuruBin?: string;
