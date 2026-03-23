@@ -10,6 +10,15 @@ export interface NetworkConfig {
 	allow?: string[];
 }
 
+export interface MountConfig {
+	/** Host path to mount from. */
+	hostPath: string;
+	/** Guest path to mount at. */
+	guestPath: string;
+	/** Mount mode: "ro" (default) or "rw". */
+	mode?: "ro" | "rw";
+}
+
 export interface StartOptions {
 	from?: string;
 	cpus?: number;
@@ -17,7 +26,8 @@ export interface StartOptions {
 	diskSize?: number;
 	allowNet?: boolean;
 	ports?: string[];
-	mounts?: Record<string, string>;
+	/** Host → guest directory mounts. Mode defaults to "ro". */
+	mounts?: MountConfig[];
 	secrets?: Record<string, SecretConfig>;
 	network?: NetworkConfig;
 	shuruBin?: string;

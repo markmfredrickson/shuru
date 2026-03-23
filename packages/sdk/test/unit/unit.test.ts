@@ -69,9 +69,12 @@ describe("buildArgs", () => {
 		]);
 	});
 
-	test("mounts", () => {
+	test("mounts default to read-only", () => {
 		const args = buildArgs("shuru", {
-			mounts: { "./src": "/workspace", "./data": "/data" },
+			mounts: [
+				{ hostPath: "./src", guestPath: "/workspace" },
+				{ hostPath: "./data", guestPath: "/data" },
+			],
 		});
 		expect(args).toEqual([
 			"shuru",
@@ -82,6 +85,47 @@ describe("buildArgs", () => {
 			"--mount",
 			"./data:/data",
 		]);
+	});
+
+	test("mount with rw mode appends suffix", () => {
+		const args = buildArgs("shuru", {
+			mounts: [
+				{ hostPath: "./src", guestPath: "/workspace", mode: "rw" },
+			],
+		});
+		expect(args).toEqual([
+			"shuru",
+			"run",
+			"--stdio",
+			"--mount",
+			"./src:/workspace:rw",
+		]);
+	});
+
+	test("mount with explicit ro omits suffix", () => {
+		const args = buildArgs("shuru", {
+			mounts: [
+				{ hostPath: "./src", guestPath: "/workspace", mode: "ro" },
+			],
+		});
+		expect(args).toEqual([
+			"shuru",
+			"run",
+			"--stdio",
+			"--mount",
+			"./src:/workspace",
+		]);
+	});
+
+	test("duplicate guest paths rejected", () => {
+		expect(() =>
+			buildArgs("shuru", {
+				mounts: [
+					{ hostPath: "./a", guestPath: "/workspace" },
+					{ hostPath: "./b", guestPath: "/workspace", mode: "rw" },
+				],
+			}),
+		).toThrow("duplicate guest mount path: /workspace");
 	});
 
 	test("secrets", () => {
@@ -139,7 +183,7 @@ describe("buildArgs", () => {
 			diskSize: 4096,
 			allowNet: true,
 			ports: ["8080:80"],
-			mounts: { "./src": "/workspace" },
+			mounts: [{ hostPath: "./src", guestPath: "/workspace" }],
 		});
 		expect(args).toEqual([
 			"shuru",

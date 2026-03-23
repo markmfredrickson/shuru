@@ -219,8 +219,14 @@ export function buildArgs(bin: string, opts: StartOptions): string[] {
 	}
 
 	if (opts.mounts) {
-		for (const [host, guest] of Object.entries(opts.mounts)) {
-			args.push("--mount", `${host}:${guest}`);
+		const seen = new Set<string>();
+		for (const mount of opts.mounts) {
+			if (seen.has(mount.guestPath)) {
+				throw new Error(`duplicate guest mount path: ${mount.guestPath}`);
+			}
+			seen.add(mount.guestPath);
+			const suffix = mount.mode === "rw" ? ":rw" : "";
+			args.push("--mount", `${mount.hostPath}:${mount.guestPath}${suffix}`);
 		}
 	}
 
