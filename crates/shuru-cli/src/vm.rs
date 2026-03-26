@@ -23,11 +23,22 @@ pub(crate) fn clone_file(src: &str, dst: &str) -> Result<()> {
     Ok(())
 }
 
-use shuru_vm::{MountConfig, PortMapping, Sandbox};
+use shuru_vm::{MountConfig, NetworkMode, PortMapping, Sandbox};
 
 use crate::assets;
 use crate::cli::VmArgs;
 use crate::config::ShuruConfig;
+
+/// Resolved network mode for the VM.
+#[derive(Debug, Clone)]
+pub(crate) enum NetMode {
+    /// No networking.
+    None,
+    /// Proxy-based networking with optional allowlist and secrets.
+    Proxy(shuru_proxy::config::ProxyConfig),
+    /// NAT networking — full speed, no filtering.
+    Nat,
+}
 
 pub(crate) struct PreparedVm {
     pub instance_dir: String,
@@ -37,7 +48,7 @@ pub(crate) struct PreparedVm {
     pub cpus: usize,
     pub memory: u64,
     pub disk_size: u64,
-    pub proxy_config: Option<shuru_proxy::config::ProxyConfig>,
+    pub net_mode: NetMode,
     pub verbose: bool,
     pub forwards: Vec<PortMapping>,
     pub mounts: Vec<MountConfig>,
@@ -51,30 +62,37 @@ pub(crate) fn prepare_vm(
     let cpus = vm.cpus.or(cfg.cpus).unwrap_or(2);
     let memory = vm.memory.or(cfg.memory).unwrap_or(2048);
     let disk_size = vm.disk_size.or(cfg.disk_size).unwrap_or(4096);
-    let allow_net = vm.allow_net || cfg.allow_net.unwrap_or(false);
     let verbose = vm.verbose;
 
-    let proxy_config = if allow_net {
-        let mut proxy = cfg.to_proxy_config();
-
-        // Merge --secret flags: NAME=ENV_VAR@host1,host2
-        for s in &vm.secret {
-            let (name, from, hosts) = parse_secret_flag(s)
-                .with_context(|| format!("invalid --secret: '{}' (expected NAME=ENV@host1,host2)", s))?;
-            proxy.secrets.insert(
-                name,
-                shuru_proxy::config::SecretConfig { from, hosts },
-            );
+    // Resolve network mode: --net flag, --allow-net alias, or config
+    let net_mode = {
+        let mode_str = if vm.allow_net { "proxy" } else { vm.net.as_str() };
+        let mode_str = if mode_str == "none" {
+            // Check config file fallback
+            if cfg.allow_net.unwrap_or(false) { "proxy" } else { "none" }
+        } else {
+            mode_str
+        };
+        match mode_str {
+            "none" => NetMode::None,
+            "nat" => NetMode::Nat,
+            "proxy" => {
+                let mut proxy = cfg.to_proxy_config();
+                for s in &vm.secret {
+                    let (name, from, hosts) = parse_secret_flag(s)
+                        .with_context(|| format!("invalid --secret: '{}' (expected NAME=ENV@host1,host2)", s))?;
+                    proxy.secrets.insert(
+                        name,
+                        shuru_proxy::config::SecretConfig { from, hosts },
+                    );
+                }
+                for d in &vm.allow_host {
+                    proxy.network.allow.push(d.clone());
+                }
+                NetMode::Proxy(proxy)
+            }
+            other => bail!("unknown --net mode: '{}' (expected: none, proxy, nat)", other),
         }
-
-        // Merge --allow-domain flags
-        for d in &vm.allow_host {
-            proxy.network.allow.push(d.clone());
-        }
-
-        Some(proxy)
-    } else {
-        None
     };
 
     // Merge port forwards: CLI flags + config file
@@ -203,7 +221,7 @@ pub(crate) fn prepare_vm(
         cpus,
         memory,
         disk_size,
-        proxy_config,
+        net_mode,
         verbose,
         forwards,
         mounts,
@@ -213,7 +231,7 @@ pub(crate) fn prepare_vm(
 pub(crate) fn build_sandbox(
     prepared: &PreparedVm,
     console: bool,
-    network_fd: Option<i32>,
+    network: NetworkMode,
 ) -> Result<Sandbox> {
     let mut builder = Sandbox::builder()
         .kernel(&prepared.kernel_path)
@@ -221,11 +239,8 @@ pub(crate) fn build_sandbox(
         .cpus(prepared.cpus)
         .memory_mb(prepared.memory)
         .console(console)
-        .verbose(prepared.verbose);
-
-    if let Some(fd) = network_fd {
-        builder = builder.network_fd(fd);
-    }
+        .verbose(prepared.verbose)
+        .network(network);
 
     if let Some(initrd) = &prepared.initrd_path {
         builder = builder.initrd(initrd);
@@ -248,21 +263,26 @@ pub(crate) fn run_command(prepared: &PreparedVm, command: &[String]) -> Result<i
         prepared.cpus, prepared.memory, prepared.disk_size
     );
 
-    // Set up proxy networking if --allow-net
-    let (vm_fd, proxy_handle) = if let Some(ref proxy_config) = prepared.proxy_config {
-        let (vm_fd, host_fd) = shuru_proxy::create_socketpair()?;
-        let handle = shuru_proxy::start(host_fd, proxy_config.clone())?;
-
-        if prepared.verbose {
-            eprintln!("shuru: proxy started");
+    // Set up networking based on mode
+    let (network_mode, proxy_handle) = match &prepared.net_mode {
+        NetMode::None => (NetworkMode::None, None),
+        NetMode::Nat => {
+            if prepared.verbose {
+                eprintln!("shuru: NAT networking enabled");
+            }
+            (NetworkMode::Nat, None)
         }
-
-        (Some(vm_fd), Some(handle))
-    } else {
-        (None, None)
+        NetMode::Proxy(proxy_config) => {
+            let (vm_fd, host_fd) = shuru_proxy::create_socketpair()?;
+            let handle = shuru_proxy::start(host_fd, proxy_config.clone())?;
+            if prepared.verbose {
+                eprintln!("shuru: proxy started");
+            }
+            (NetworkMode::Proxy(vm_fd), Some(handle))
+        }
     };
 
-    let sandbox = build_sandbox(prepared, false, vm_fd)?;
+    let sandbox = build_sandbox(prepared, false, network_mode)?;
     if prepared.verbose {
         eprintln!("shuru: VM created and validated successfully");
     }

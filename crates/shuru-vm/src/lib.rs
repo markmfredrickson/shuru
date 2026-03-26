@@ -7,7 +7,7 @@ pub use shuru_proto::{
     ReadFileRequest, WriteFileRequest, WriteFileResponse,
     VSOCK_PORT, VSOCK_PORT_FORWARD,
 };
-pub use sandbox::{MountConfig, PortForwardHandle, Sandbox, VmConfigBuilder};
+pub use sandbox::{MountConfig, NetworkMode, PortForwardHandle, Sandbox, VmConfigBuilder};
 
 // Re-exports from shuru-darwin for advanced/escape-hatch use
 pub use shuru_darwin::VirtualMachine;

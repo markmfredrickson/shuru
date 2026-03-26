@@ -147,55 +147,90 @@ mod guest {
     }
 
     // --- Networking setup ---
-    // Network is configured by initramfs before switch_root (static IP for proxy).
-    // By the time we get here, eth0 already has an IP if --allow-net was used.
+    // Initramfs configures eth0 with static 10.0.0.2/24 (proxy mode) before switch_root.
+    // If shuru.net=nat is on the kernel cmdline, we reconfigure for Apple NAT networking.
+
+    fn read_net_mode() -> Option<String> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        crate::parse_net_mode(&cmdline)
+    }
+
+    fn make_sockaddr_in(a: u8, b: u8, c: u8, d: u8) -> libc::sockaddr_in {
+        libc::sockaddr_in {
+            sin_family: libc::AF_INET as _,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes([a, b, c, d]) },
+            sin_zero: [0; 8],
+        }
+    }
+
+    fn set_interface_addr(sock: i32, name: &[u8], ioctl_cmd: u64, addr: &libc::sockaddr_in) -> bool {
+        unsafe {
+            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let copy_len = name.len().min(libc::IFNAMSIZ);
+            std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, copy_len);
+            ifr.ifr_ifru.ifru_addr = *(addr as *const libc::sockaddr_in as *const libc::sockaddr);
+            libc::ioctl(sock, ioctl_cmd as _, &ifr) == 0
+        }
+    }
+
+    // Apple Virtualization.framework NAT empirically uses 192.168.64.0/24 with
+    // gateway at .1 (via vmnet). This is not formally documented — if it breaks,
+    // the guest needs a DHCP client (udhcpc) or the subnet needs discovery.
+    // https://developer.apple.com/documentation/virtualization/vznatnetworkdeviceattachment
+    fn configure_nat(sock: i32) {
+        let ip = make_sockaddr_in(192, 168, 64, 2);
+        let mask = make_sockaddr_in(255, 255, 255, 0);
+
+        if !set_interface_addr(sock, b"eth0\0", libc::SIOCSIFADDR as _, &ip) {
+            eprintln!("shuru-guest: failed to set NAT IP address");
+            return;
+        }
+        if !set_interface_addr(sock, b"eth0\0", libc::SIOCSIFNETMASK as _, &mask) {
+            eprintln!("shuru-guest: failed to set NAT netmask");
+        }
+        bring_up_interface(sock, b"eth0\0");
+
+        let _ = std::process::Command::new("/sbin/ip")
+            .args(["route", "replace", "default", "via", "192.168.64.1"])
+            .output();
+
+        let _ = std::fs::write("/etc/resolv.conf", "nameserver 8.8.8.8\n");
+
+        eprintln!("shuru-guest: NAT networking configured (192.168.64.2/24, gw 192.168.64.1)");
+    }
+
+    fn interface_exists(sock: i32, name: &[u8]) -> bool {
+        unsafe {
+            let mut ifr: libc::ifreq = std::mem::zeroed();
+            let copy_len = name.len().min(libc::IFNAMSIZ);
+            std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, copy_len);
+            libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) == 0
+        }
+    }
 
     fn setup_networking() {
-        unsafe {
-            let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-            if sock < 0 {
-                eprintln!("shuru-guest: failed to create socket for networking setup");
-                return;
-            }
-
-            bring_up_interface(sock, b"lo\0");
-
-            // Check if eth0 exists (network device present)
-            let has_eth0 = {
-                let mut ifr: libc::ifreq = std::mem::zeroed();
-                std::ptr::copy_nonoverlapping(
-                    b"eth0\0".as_ptr(),
-                    ifr.ifr_name.as_mut_ptr() as *mut u8,
-                    5,
-                );
-                libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) == 0
-            };
-
-            if !has_eth0 {
-                libc::close(sock);
-                eprintln!("shuru-guest: no network device (sandbox mode)");
-                return;
-            }
-
-            // Check if eth0 already has an IP (configured by initramfs)
-            let has_ip = {
-                let mut ifr: libc::ifreq = std::mem::zeroed();
-                std::ptr::copy_nonoverlapping(
-                    b"eth0\0".as_ptr(),
-                    ifr.ifr_name.as_mut_ptr() as *mut u8,
-                    5,
-                );
-                libc::ioctl(sock, libc::SIOCGIFADDR as _, &mut ifr) == 0
-            };
-
-            libc::close(sock);
-
-            if has_ip {
-                eprintln!("shuru-guest: network already configured (by initramfs)");
-            } else {
-                eprintln!("shuru-guest: eth0 present but no IP configured");
-            }
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            eprintln!("shuru-guest: failed to create socket for networking setup");
+            return;
         }
+
+        bring_up_interface(sock, b"lo\0");
+
+        if !interface_exists(sock, b"eth0\0") {
+            unsafe { libc::close(sock) };
+            eprintln!("shuru-guest: no network device (sandbox mode)");
+            return;
+        }
+
+        match read_net_mode().as_deref() {
+            Some("nat") => configure_nat(sock),
+            Some("proxy") => eprintln!("shuru-guest: proxy networking (initramfs config)"),
+            _ => eprintln!("shuru-guest: network device present, using initramfs config"),
+        }
+
+        unsafe { libc::close(sock) };
     }
 
     fn reap_zombies() {
@@ -1339,6 +1374,12 @@ mod guest {
     }
 }
 
+/// Parse shuru.net= parameter from a kernel cmdline string.
+fn parse_net_mode(cmdline: &str) -> Option<String> {
+    cmdline.split_whitespace()
+        .find_map(|param| param.strip_prefix("shuru.net=").map(String::from))
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     guest::run();
@@ -1347,5 +1388,39 @@ fn main() {
     {
         eprintln!("shuru-guest is a Linux-only binary meant to run inside a VM");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_net_mode_nat() {
+        assert_eq!(
+            parse_net_mode("console=hvc0 root=/dev/vda rw quiet shuru.net=nat"),
+            Some("nat".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_net_mode_proxy() {
+        assert_eq!(
+            parse_net_mode("console=hvc0 root=/dev/vda rw shuru.net=proxy"),
+            Some("proxy".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_net_mode_absent() {
+        assert_eq!(
+            parse_net_mode("console=hvc0 root=/dev/vda rw quiet"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_net_mode_empty() {
+        assert_eq!(parse_net_mode(""), None);
     }
 }

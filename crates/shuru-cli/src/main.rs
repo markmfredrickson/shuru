@@ -141,7 +141,7 @@ fn run_console(prepared: &vm::PreparedVm) -> Result<i32> {
         prepared.cpus, prepared.memory, prepared.disk_size
     );
 
-    let sandbox = vm::build_sandbox(prepared, true, None)?;
+    let sandbox = vm::build_sandbox(prepared, true, shuru_vm::NetworkMode::None)?;
     eprintln!("shuru: VM created and validated successfully");
 
     let state_rx = sandbox.state_channel();

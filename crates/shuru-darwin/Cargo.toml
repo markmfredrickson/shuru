@@ -26,4 +26,5 @@ objc2-foundation = { version = "0.3", features = [
 objc2-virtualization = { version = "0.3", features = [
     "dispatch2",
     "VZFileHandleNetworkDeviceAttachment",
+    "VZNATNetworkDeviceAttachment",
 ] }

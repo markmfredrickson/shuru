@@ -314,16 +314,18 @@ fn send_error_shared(
 pub(crate) fn run_stdio(prepared: &PreparedVm) -> Result<i32> {
     let out: SharedWriter = Arc::new(Mutex::new(io::stdout()));
 
-    // Set up proxy networking if --allow-net
-    let (vm_fd, proxy_handle) = if let Some(ref proxy_config) = prepared.proxy_config {
-        let (vm_fd, host_fd) = shuru_proxy::create_socketpair()?;
-        let handle = shuru_proxy::start(host_fd, proxy_config.clone())?;
-        (Some(vm_fd), Some(handle))
-    } else {
-        (None, None)
+    // Set up networking based on mode
+    let (network_mode, proxy_handle) = match &prepared.net_mode {
+        vm::NetMode::None => (shuru_vm::NetworkMode::None, None),
+        vm::NetMode::Nat => (shuru_vm::NetworkMode::Nat, None),
+        vm::NetMode::Proxy(proxy_config) => {
+            let (vm_fd, host_fd) = shuru_proxy::create_socketpair()?;
+            let handle = shuru_proxy::start(host_fd, proxy_config.clone())?;
+            (shuru_vm::NetworkMode::Proxy(vm_fd), Some(handle))
+        }
     };
 
-    let sandbox = Arc::new(vm::build_sandbox(prepared, false, vm_fd)?);
+    let sandbox = Arc::new(vm::build_sandbox(prepared, false, network_mode)?);
     sandbox.start()?;
 
     // Inject CA cert and secret placeholders when MITM is needed

@@ -4,8 +4,9 @@ use objc2::rc::Retained;
 use objc2::AnyThread;
 use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{
-    VZFileHandleNetworkDeviceAttachment, VZMACAddress, VZNetworkDeviceAttachment,
-    VZNetworkDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
+    VZFileHandleNetworkDeviceAttachment, VZMACAddress, VZNATNetworkDeviceAttachment,
+    VZNetworkDeviceAttachment, VZNetworkDeviceConfiguration,
+    VZVirtioNetworkDeviceConfiguration,
 };
 
 pub trait NetworkAttachment {
@@ -38,6 +39,30 @@ impl FileHandleNetworkAttachment {
 }
 
 impl NetworkAttachment for FileHandleNetworkAttachment {
+    fn as_vz_attachment(&self) -> Retained<VZNetworkDeviceAttachment> {
+        unsafe { Retained::cast_unchecked(self.inner.clone()) }
+    }
+}
+
+pub struct NatNetworkAttachment {
+    inner: Retained<VZNATNetworkDeviceAttachment>,
+}
+
+impl NatNetworkAttachment {
+    /// Creates a NAT network attachment. The host performs network address
+    /// translation for guest traffic — no proxy, no socketpair, full speed.
+    pub fn new() -> Self {
+        unsafe {
+            NatNetworkAttachment {
+                inner: VZNATNetworkDeviceAttachment::init(
+                    VZNATNetworkDeviceAttachment::alloc(),
+                ),
+            }
+        }
+    }
+}
+
+impl NetworkAttachment for NatNetworkAttachment {
     fn as_vz_attachment(&self) -> Retained<VZNetworkDeviceAttachment> {
         unsafe { Retained::cast_unchecked(self.inner.clone()) }
     }

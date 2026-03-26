@@ -10,8 +10,20 @@ use anyhow::{bail, Context, Result};
 use crossbeam_channel::Receiver;
 
 use shuru_darwin::terminal;
-use shuru_darwin::network::FileHandleNetworkAttachment;
+use shuru_darwin::network::{FileHandleNetworkAttachment, NatNetworkAttachment};
 use shuru_darwin::*;
+
+/// Network mode for the VM.
+#[derive(Debug, Clone, Default)]
+pub enum NetworkMode {
+    /// No network device attached.
+    #[default]
+    None,
+    /// Proxy-based networking via a socketpair fd. Enables domain allowlisting and secret injection.
+    Proxy(i32),
+    /// NAT networking via Apple's Virtualization.framework. Full speed, no filtering.
+    Nat,
+}
 
 use shuru_proto::{
     frame, ChmodRequest, CopyRequest, ExecRequest, ForwardRequest, ForwardResponse, FsOkResponse,
@@ -38,7 +50,7 @@ pub struct VmConfigBuilder {
     memory_mb: u64,
     console: bool,
     verbose: bool,
-    network_fd: Option<i32>,
+    network: NetworkMode,
     mounts: Vec<MountConfig>,
 }
 
@@ -52,7 +64,7 @@ impl VmConfigBuilder {
             memory_mb: 2048,
             console: true,
             verbose: false,
-            network_fd: None,
+            network: NetworkMode::None,
             mounts: Vec::new(),
         }
     }
@@ -97,10 +109,26 @@ impl VmConfigBuilder {
         self
     }
 
-    /// Attach a network device via a socketpair fd for proxy-based networking.
-    pub fn network_fd(mut self, fd: i32) -> Self {
-        self.network_fd = Some(fd);
+    /// Set the network mode for the VM.
+    pub fn network(mut self, mode: NetworkMode) -> Self {
+        self.network = mode;
         self
+    }
+
+    fn create_network_device(mode: &NetworkMode) -> Option<VirtioNetworkDevice> {
+        let device = match mode {
+            NetworkMode::None => return None,
+            NetworkMode::Proxy(fd) => {
+                let attachment = FileHandleNetworkAttachment::new(*fd);
+                VirtioNetworkDevice::new_with_attachment(&attachment)
+            }
+            NetworkMode::Nat => {
+                let attachment = NatNetworkAttachment::new();
+                VirtioNetworkDevice::new_with_attachment(&attachment)
+            }
+        };
+        device.set_mac_address(&MACAddress::random_local());
+        Some(device)
     }
 
     /// Add a host directory mount (virtio-fs).
@@ -122,12 +150,17 @@ impl VmConfigBuilder {
             boot_loader.set_initrd(initrd);
         }
 
-        let cmdline = if self.verbose {
-            "console=hvc0 root=/dev/vda rw"
-        } else {
-            "console=hvc0 root=/dev/vda rw quiet"
+        let net_param = match &self.network {
+            NetworkMode::Nat => " shuru.net=nat",
+            NetworkMode::Proxy(_) => " shuru.net=proxy",
+            NetworkMode::None => "",
         };
-        boot_loader.set_command_line(cmdline);
+        let cmdline = if self.verbose {
+            format!("console=hvc0 root=/dev/vda rw{net_param}")
+        } else {
+            format!("console=hvc0 root=/dev/vda rw quiet{net_param}")
+        };
+        boot_loader.set_command_line(&cmdline);
 
         let memory_bytes = self.memory_mb * 1024 * 1024;
         let config = VirtualMachineConfiguration::new(&boot_loader, self.cpus, memory_bytes);
@@ -158,10 +191,7 @@ impl VmConfigBuilder {
         let block_device = VirtioBlockDevice::new(&disk_attachment);
         config.set_storage_devices(&[&block_device]);
 
-        if let Some(fd) = self.network_fd {
-            let net_attachment = FileHandleNetworkAttachment::new(fd);
-            let net_device = VirtioNetworkDevice::new_with_attachment(&net_attachment);
-            net_device.set_mac_address(&MACAddress::random_local());
+        if let Some(net_device) = Self::create_network_device(&self.network) {
             config.set_network_devices(&[net_device]);
         }
 

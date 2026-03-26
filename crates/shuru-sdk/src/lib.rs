@@ -470,7 +470,7 @@ fn boot_vm(
         .console(false); // No serial console in SDK mode
 
     if let Some(fd) = vm_fd {
-        builder = builder.network_fd(fd);
+        builder = builder.network(shuru_vm::NetworkMode::Proxy(fd));
     }
     if let Some(ref initrd) = initrd_path {
         builder = builder.initrd(initrd);
